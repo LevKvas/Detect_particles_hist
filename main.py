@@ -1,6 +1,7 @@
 import numpy as np
 import gradio as gr
 import spaces
+import math
 import cv2
 from cellpose import models
 from matplotlib.colors import hsv_to_rgb
@@ -15,9 +16,11 @@ from huggingface_hub import hf_hub_download
 img = np.zeros((96, 128), dtype=np.uint8)
 fp0 = Image.fromarray(img)
 
+# 117 пкс - 20 нм
+# 1 пкс - 0.171 нм
 
-# fp0 = "0.png"
-# imsave(fp0, img)
+K_PX_TO_NM = 0.171  # to convert pixels to nm
+
 
 # data  retrieval
 def download_weights():
@@ -70,7 +73,7 @@ def plot_flows(y):
     return flow
 
 
-def plot_outlines(img, masks): # in this func I can return contours
+def plot_outlines(img, masks):  # in this func I can return contours
     img = normalize99(img)
     img = np.clip(img, 0, 1)
     outpix = []
@@ -97,17 +100,6 @@ def plot_outlines(img, masks): # in this func I can return contours
         for o in outpix:
             ax.plot(o[:, 0], img.shape[0] - o[:, 1], color=[1, 0, 0], lw=1)
     ax.axis('off')
-
-    # bytes_image = io.BytesIO()
-    # plt.savefig(bytes_image, format='png', facecolor=fig.get_facecolor(), edgecolor='none')
-    # bytes_image.seek(0)
-    # img_arr = np.frombuffer(bytes_image.getvalue(), dtype=np.uint8)
-    # bytes_image.close()
-    # img = cv2.imdecode(img_arr, 1)
-    # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    # del bytes_image
-    # fig.clf()
-    # plt.close(fig)
 
     buf = io.BytesIO()
     fig.savefig(buf, bbox_inches='tight')
@@ -204,12 +196,12 @@ def get_contour_coordinates(masks):
     return all_contours
 
 
-def calculate_eccentricity(major_axis, minor_axis):
-    """Calculate the eccentricity of an ellipse"""
-    if major_axis >= minor_axis:
-        return np.sqrt(1 - (minor_axis**2) / (major_axis**2))
+def calculate_eccentricity(a, b):
+    """a and b are semi-axes"""
+    if a >= b:
+        return np.sqrt(1 - (b ** 2) / (a ** 2))
     else:
-        return np.sqrt(1 - (major_axis**2) / (minor_axis**2))
+        return np.sqrt(1 - (a ** 2) / (b ** 2))
 
 
 def build_eccentricity_dist(some_array, bins=10):
@@ -233,7 +225,7 @@ def build_eccentricity_dist(some_array, bins=10):
 
     plt.xlabel('Eccentricity')
     plt.ylabel('Number of Particles')
-    plt.title(f'Eccentricity Distribution (n={len(some_array)})')  # ← ДОБАВИЛ ЗАГОЛОВОК
+    plt.title(f'Eccentricity Distribution (n={len(some_array)}, bins={bins})')
     plt.grid(True, alpha=0.3)
     plt.xticks(bin_edges)
 
@@ -252,8 +244,57 @@ def build_eccentricity_dist(some_array, bins=10):
     return Image.open(buf)
 
 
-def work_with_contours(contours_data_all):
+def build_square_dist(some_array, bins=10):
+    """Calculate the distribution of the number of particles from square values"""
+    min_square = min(some_array)
+    max_square = max(some_array)
+
+    if max_square < 1.0:
+        max_square = 1.0
+    else:
+        max_square = max_square * 1.1
+
+    square_bins = np.linspace(min_square, max_square, bins + 1)
+    hist, bin_edges = np.histogram(some_array, bins=square_bins)
+
+    plt.figure(figsize=(10, 6))
+
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    bin_width = bin_edges[1] - bin_edges[0]
+
+    # create hist
+    bars = plt.bar(bin_centers, hist, width=bin_width * 0.8,
+                   alpha=0.7, color='skyblue', edgecolor='black')
+
+    # add values on columns
+    for bar, count in zip(bars, hist):
+        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.1,
+                 f'{count}', ha='center', va='bottom')
+
+    plt.xlabel('Square, nm^2')
+    plt.ylabel('Number of Particles')
+    plt.title(f'Square Distribution (n={len(some_array)}, bins={bins})')
+    plt.grid(True, alpha=0.3)
+    plt.xticks(bin_edges)
+
+    # statistics
+    total_particles = np.sum(hist)
+    plt.text(0.02, 0.98, f'Total particles: {total_particles}',
+             transform=plt.gca().transAxes, fontsize=12,
+             bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray"))
+
+    # convert in image for Gradio
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+
+    return Image.open(buf)
+
+
+def work_with_contours(contours_data_all, bins=10):
     array_with_eccentricity = []
+    array_with_squares = []
 
     for contour_data in contours_data_all:
         coordinates = contour_data['coordinates']
@@ -267,11 +308,13 @@ def work_with_contours(contours_data_all):
             ellipse = cv2.fitEllipse(contour_points)
             center, axes, angle = ellipse
 
-            major_axis = max(axes)
-            minor_axis = min(axes)
-            eccentricity = calculate_eccentricity(major_axis, minor_axis)
+            major_axis = max(axes) * K_PX_TO_NM  # full axis in nm
+            minor_axis = min(axes) * K_PX_TO_NM  # full axis in nm
+            square = math.pi * (major_axis / 2) * (minor_axis / 2)  # nm^2
+            eccentricity = calculate_eccentricity(major_axis / 2, minor_axis / 2)
 
             array_with_eccentricity.append(eccentricity)
+            array_with_squares.append(square)
 
         except Exception as e:
             print(f"Error fitting ellipse: {e}")
@@ -279,8 +322,10 @@ def work_with_contours(contours_data_all):
 
     if not array_with_eccentricity:
         return create_empty_histogram()
+    if not array_with_squares:
+        return create_empty_histogram()
 
-    return build_eccentricity_dist(array_with_eccentricity)
+    return build_eccentricity_dist(array_with_eccentricity, bins), build_square_dist(array_with_squares, bins)
 
 
 def create_empty_histogram():
@@ -300,88 +345,75 @@ def create_empty_histogram():
     return Image.open(buf)
 
 
-def cellpose_segment(filepath, resize=1000, max_iter=250, flow_threshold=0.4, cellprob_threshold=0):
+def cellpose_segment(filepath, max_iter=250, flow_threshold=0.4, cellprob_threshold=0, bins=10):
     zip_path = os.path.splitext(filepath[-1])[0] + "_masks.zip"
     json_path = os.path.splitext(filepath[-1])[0] + "_contours.json"
 
     contour_data_all = []
-    # zip_path = 'masks.zip'
+
     with ZipFile(zip_path, 'w') as myzip:
         for j in range((len(filepath))):
             now = datetime.datetime.now()
             formatted_now = now.strftime("%Y-%m-%d %H:%M:%S")
 
             img_input = imread(filepath[j])
-            # img_input = np.array(img_pil)
-            img = image_resize(img_input, resize=resize)
 
-            maxsize = np.max(img.shape)
-            if maxsize <= 1000:
-                masks, flows = run_model_gpu(img, max_iter, flow_threshold, cellprob_threshold)
-            elif maxsize < 5000:
-                masks, flows = run_model_gpu60(img, max_iter, flow_threshold, cellprob_threshold)
-            elif maxsize < 20000:
-                masks, flows = run_model_gpu240(img, max_iter, flow_threshold, cellprob_threshold)
-            else:
-                raise ValueError("Image size must be less than 20,000")
+            processing_resize = 100  # always work with a 100px!
+            img_processed = image_resize(img_input, resize=processing_resize)
+            # detecting
+            masks_small, flows = run_model_gpu(img_processed, max_iter, flow_threshold, cellprob_threshold)
 
+            # SCALE the masks back to their original size
+            target_size = (img_input.shape[1], img_input.shape[0])
+            masks = cv2.resize(masks_small.astype('uint16'), target_size,
+                               interpolation=cv2.INTER_NEAREST).astype('uint16')
+
+            # Get contours from SCALED masks
             contours_data = get_contour_coordinates(masks)
             contour_data_all.extend(contours_data)
 
-            print(formatted_now, j, masks.max(), os.path.split(filepath[j])[-1])
-
-            target_size = (img_input.shape[1], img_input.shape[0])
-            if (target_size[0] != img.shape[1] or target_size[1] != img.shape[0]):
-                # scale it back to keep the orignal size
-                masks_rsz = cv2.resize(masks.astype('uint16'), target_size, interpolation=cv2.INTER_NEAREST).astype(
-                    'uint16')
-            else:
-                masks_rsz = masks.copy()
+            print(
+                f"{formatted_now} {j} {masks.max()} {os.path.split(filepath[j])[-1]} (processed at {processing_resize}px)")
 
             fname_masks = os.path.splitext(filepath[j])[0] + "_masks.tif"
-            imsave(fname_masks, masks_rsz)
-
+            imsave(fname_masks, masks)
             myzip.write(fname_masks, arcname=os.path.split(fname_masks)[-1])
 
-    # masks, flows, _ = model.eval(img, channels=[0,0])
     flows = flows[0]
-    # masks = np.zeros(img.shape[:2])
-    # flows = np.zeros_like(img)
 
-    outpix = plot_outlines(img, masks)
-    histogram_image = work_with_contours(contour_data_all)  # build based on all data
+    # DISPLAY on the original size
+    outpix = plot_outlines(img_input, masks)  # Original image + scaled masks
+    hist_eccentricity, hist_squares = work_with_contours(contour_data_all, bins)
 
     import json
     with open(json_path, 'w') as f:
         json.dump(contour_data_all, f, indent=2)
 
-    # overlay = plot_overlay(img, masks)
-
-    # crand = .2 + .8 * np.random.rand(np.max(masks.flatten()).astype('int')+1,).astype('float32')
-    # crand[0] = 0
-
-    # overlay = Image.fromarray(overlay)
     flows = Image.fromarray(flows)
 
-    Ly, Lx = img.shape[:2]
-    outpix = outpix.resize((Lx, Ly), resample=Image.BICUBIC)
-    # overlay = overlay.resize((Lx, Ly), resample  = Image.BICUBIC)
-    flows = flows.resize((Lx, Ly), resample=Image.BICUBIC)
+    # We leave the original size for display
+    Ly, Lx = img_input.shape[:2]
+
+    # If the image is too large, you can reduce it slightly for display purposes only
+    max_display_size = 1200
+    if Ly > max_display_size or Lx > max_display_size:
+        scale = max_display_size / max(Ly, Lx)
+        new_size = (int(Lx * scale), int(Ly * scale))
+        outpix = outpix.resize(new_size, resample=Image.BICUBIC)
+        flows = flows.resize(new_size, resample=Image.BICUBIC)
+    # else: we leave it as it is
 
     fname_out = os.path.splitext(filepath[-1])[0] + "_outlines.png"
-    outpix.save(fname_out)  # "outlines.png")
-
-    # fname_flows  = os.path.splitext(filepath[-1])[0]+"_flows.png"
-    # flows.save(fname_flows) #"outlines.png")
+    outpix.save(fname_out)
 
     if len(filepath) > 1:
         b1 = gr.DownloadButton(visible=True, value=zip_path)
     else:
         b1 = gr.DownloadButton(visible=True, value=fname_masks)
-    b2 = gr.DownloadButton(visible=True, value=fname_out)  # "outlines.png")
+    b2 = gr.DownloadButton(visible=True, value=fname_out)
     b3 = gr.DownloadButton(visible=True, value=json_path)
 
-    return outpix, flows, b1, b2, b3, histogram_image
+    return outpix, flows, b1, b2, b3, hist_eccentricity, hist_squares
 
 
 def download_function():
@@ -456,15 +488,13 @@ with gr.Blocks(title="Hello",
             with gr.Row():
                 with gr.Column(scale=1):
                     with gr.Row():
-                        resize = gr.Number(label='max resize', value=1000)
                         max_iter = gr.Number(label='max iterations', value=250)
                         flow_threshold = gr.Number(label='flow threshold', value=0.4)
                         cellprob_threshold = gr.Number(label='cellprob threshold', value=0)
 
+                    bins_number = gr.Number(label='Number of bins in histograms', value=10, minimum=5, maximum=50)
                     up_btn = gr.UploadButton("Multi-file upload (png, jpg, tif etc)", visible=True,
                                              file_count="multiple")
-
-                    # gr.HTML("""<h4 style="color:white;"> Note2: Only the first image of a tif will display the segmentations, but you can download segmentations for all planes. </h4>""")
 
                 with gr.Column(scale=1):
                     send_btn = gr.Button("Run Cellpose-SAM")
@@ -479,23 +509,21 @@ with gr.Blocks(title="Hello",
             flows = gr.Image(label="Cellpose flows", type="pil", format='png',
                              value=fp0)  # , width = "50vw", height = "20vw")
 
-            histogram_output = gr.Image(label="Eccentricity Distribution", type="pil",
-                                        format='png', value=fp0)
+            # all hists
+            hist_eccentricity = gr.Image(label="Eccentricity Distribution", type="pil",
+                                         format='png', value=fp0)
+            hist_squares = gr.Image(label="Squares Distribution", type="pil",
+                                    format='png', value=fp0)
 
     sample_list = glob.glob("samples/*.png")
-    # sample_list = []
-    # for j in range(23):
-    #    sample_list.append("samples/img%0.2d.png"%j)
 
     gr.Examples(sample_list, fn=update_button, inputs=input_image, outputs=[input_image, up_btn, outlines, flows],
                 examples_per_page=50, label="Click on an example to try it")
     input_image.upload(update_button, input_image, [input_image, up_btn, outlines, flows])
     up_btn.upload(update_image, up_btn, [input_image, up_btn, outlines, flows])
 
-    send_btn.click(cellpose_segment, [up_btn, resize, max_iter, flow_threshold, cellprob_threshold],
-                   [outlines, flows, down_btn, down_btn2, down_btn3, histogram_output])
-
-    # down_btn.click(download_function, None, [down_btn, down_btn2])
+    send_btn.click(cellpose_segment, [up_btn, max_iter, flow_threshold, cellprob_threshold, bins_number],
+                   [outlines, flows, down_btn, down_btn2, down_btn3, hist_eccentricity, hist_squares])
 
     gr.HTML("""<h4 style="color:white;"> Notes:<br> 
                     <li>you can load and process 2D, multi-channel tifs.
