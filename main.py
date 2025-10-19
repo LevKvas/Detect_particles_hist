@@ -205,37 +205,72 @@ def calculate_eccentricity(a, b):
 
 
 def build_eccentricity_dist(some_array, bins=10):
-    """Calculate the distribution of the number of particles from eccentricity values"""
+    """Calculate the distribution with smart text positioning"""
     eccentricity_bins = np.linspace(0, 1.0, bins + 1)
     hist, bin_edges = np.histogram(some_array, bins=eccentricity_bins)
 
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(12, 6))  # Увеличим ширину для большего количества бинов
 
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
     bin_width = bin_edges[1] - bin_edges[0]
 
-    # create hist
+    # Создаем гистограмму
     bars = plt.bar(bin_centers, hist, width=bin_width * 0.8,
                    alpha=0.7, color='skyblue', edgecolor='black')
 
-    # add values on columns
+    # УМНОЕ ПОЗИЦИОНИРОВАНИЕ ТЕКСТА
+    max_height = max(hist) if len(hist) > 0 else 1
+
     for bar, count in zip(bars, hist):
-        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.1,
-                 f'{count}', ha='center', va='bottom')
+        if count > 0:  # Только для непустых столбцов
+            bar_height = bar.get_height()
+            bar_center = bar.get_x() + bar.get_width() / 2
+
+            # Определяем позицию текста
+            if bins <= 15:
+                # Для малого количества бинов - текст над столбцом
+                y_pos = bar_height + max_height * 0.02
+                va = 'bottom'
+                color = 'black'
+            else:
+                # Для большого количества бинов - текст внутри столбца
+                if bar_height > max_height * 0.3:
+                    y_pos = bar_height * 0.7  # Высоко внутри столбца
+                    color = 'black'
+                else:
+                    y_pos = bar_height * 0.5  # По центру
+                    color = 'black' if bar_height > max_height * 0.1 else 'white'
+                va = 'center'
+
+            # Уменьшаем размер шрифта для большого количества бинов
+            fontsize = 8 if bins > 20 else (9 if bins > 15 else 10)
+
+            plt.text(bar_center, y_pos, f'{count}',
+                     ha='center', va=va, color=color,
+                     fontsize=fontsize, fontweight='bold')
 
     plt.xlabel('Eccentricity')
     plt.ylabel('Number of Particles')
     plt.title(f'Eccentricity Distribution (n={len(some_array)}, bins={bins})')
     plt.grid(True, alpha=0.3)
-    plt.xticks(bin_edges)
 
-    # statistics
+    # Динамическое расположение подписей оси X
+    if bins > 20:
+        plt.xticks(bin_edges[::2])  # Каждая вторая метка
+    elif bins > 15:
+        plt.xticks(bin_edges[::2])  # Каждая вторая метка
+    else:
+        plt.xticks(bin_edges)
+
+    # Статистика
     total_particles = np.sum(hist)
-    plt.text(0.02, 0.98, f'Total particles: {total_particles}',
-             transform=plt.gca().transAxes, fontsize=12,
+    plt.text(0.02, 0.98, f'Total particles: {total_particles}\nBins: {bins}',
+             transform=plt.gca().transAxes, fontsize=10,
              bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray"))
 
-    # convert in image for Gradio
+    # Автоматически регулируем высоту графика
+    plt.ylim(0, max_height * 1.15)
+
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
     buf.seek(0)
@@ -245,7 +280,7 @@ def build_eccentricity_dist(some_array, bins=10):
 
 
 def build_square_dist(some_array, bins=10):
-    """Calculate the distribution of the number of particles from square values"""
+    """Calculate the distribution with smart text positioning"""
     min_square = min(some_array)
     max_square = max(some_array)
 
@@ -257,33 +292,69 @@ def build_square_dist(some_array, bins=10):
     square_bins = np.linspace(min_square, max_square, bins + 1)
     hist, bin_edges = np.histogram(some_array, bins=square_bins)
 
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(12, 6))  # Увеличили ширину
 
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
     bin_width = bin_edges[1] - bin_edges[0]
 
-    # create hist
     bars = plt.bar(bin_centers, hist, width=bin_width * 0.8,
-                   alpha=0.7, color='skyblue', edgecolor='black')
+                   alpha=0.7, color='lightgreen', edgecolor='black')
 
-    # add values on columns
+    # УМНОЕ ПОЗИЦИОНИРОВАНИЕ ТЕКСТА
+    max_height = max(hist) if len(hist) > 0 else 1
+
     for bar, count in zip(bars, hist):
-        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.1,
-                 f'{count}', ha='center', va='bottom')
+        if count > 0:
+            bar_height = bar.get_height()
+            bar_center = bar.get_x() + bar.get_width() / 2
+
+            if bins <= 15:
+                # Мало бинов - текст сверху
+                y_pos = bar_height + max_height * 0.02
+                va = 'bottom'
+                color = 'black'
+            else:
+                # Много бинов - текст внутри
+                if bar_height > max_height * 0.4:
+                    y_pos = bar_height * 0.8
+                    color = 'black'
+                elif bar_height > max_height * 0.15:
+                    y_pos = bar_height * 0.5
+                    color = 'black'
+                else:
+                    y_pos = bar_height * 0.3
+                    color = 'white'
+                va = 'center'
+
+            fontsize = 8 if bins > 20 else (9 if bins > 15 else 10)
+
+            plt.text(bar_center, y_pos, f'{count}',
+                     ha='center', va=va, color=color,
+                     fontsize=fontsize, fontweight='bold')
 
     plt.xlabel('Square, nm^2')
     plt.ylabel('Number of Particles')
     plt.title(f'Square Distribution (n={len(some_array)}, bins={bins})')
     plt.grid(True, alpha=0.3)
-    plt.xticks(bin_edges)
 
-    # statistics
+    # Умное расположение подписей оси X
+    if bins > 20:
+        plt.xticks(bin_edges[::3])  # Каждая третья метка
+    elif bins > 15:
+        plt.xticks(bin_edges[::2])  # Каждая вторая метка
+    else:
+        plt.xticks(bin_edges)
+
+    # Статистика
     total_particles = np.sum(hist)
-    plt.text(0.02, 0.98, f'Total particles: {total_particles}',
-             transform=plt.gca().transAxes, fontsize=12,
+    mean_square = np.mean(some_array) if len(some_array) > 0 else 0
+    plt.text(0.02, 0.98, f'Total particles: {total_particles}\nBins: {bins}\nMean: {mean_square:.2f} nm²',
+             transform=plt.gca().transAxes, fontsize=10,
              bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray"))
 
-    # convert in image for Gradio
+    if max_height > 0:
+        plt.ylim(0, max_height * 1.15)
+
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
     buf.seek(0)
@@ -363,12 +434,12 @@ def cellpose_segment(filepath, max_iter=250, flow_threshold=0.4, cellprob_thresh
             # detecting
             masks_small, flows = run_model_gpu(img_processed, max_iter, flow_threshold, cellprob_threshold)
 
-            # SCALE the masks back to their original size
+            # МАСШТАБИРУЕМ маски обратно к оригинальному размеру
             target_size = (img_input.shape[1], img_input.shape[0])
             masks = cv2.resize(masks_small.astype('uint16'), target_size,
                                interpolation=cv2.INTER_NEAREST).astype('uint16')
 
-            # Get contours from SCALED masks
+            # Получаем контуры из МАСШТАБИРОВАННЫХ масок
             contours_data = get_contour_coordinates(masks)
             contour_data_all.extend(contours_data)
 
@@ -381,8 +452,8 @@ def cellpose_segment(filepath, max_iter=250, flow_threshold=0.4, cellprob_thresh
 
     flows = flows[0]
 
-    # DISPLAY on the original size
-    outpix = plot_outlines(img_input, masks)  # Original image + scaled masks
+    # ОТОБРАЖАЕМ на оригинальном размере
+    outpix = plot_outlines(img_input, masks)  # Оригинальное изображение + масштабированные маски
     hist_eccentricity, hist_squares = work_with_contours(contour_data_all, bins)
 
     import json
@@ -391,17 +462,17 @@ def cellpose_segment(filepath, max_iter=250, flow_threshold=0.4, cellprob_thresh
 
     flows = Image.fromarray(flows)
 
-    # We leave the original size for display
+    # Оставляем оригинальный размер для отображения
     Ly, Lx = img_input.shape[:2]
 
-    # If the image is too large, you can reduce it slightly for display purposes only
+    # Если изображение слишком большое, можно немного уменьшить ТОЛЬКО для отображения
     max_display_size = 1200
     if Ly > max_display_size or Lx > max_display_size:
         scale = max_display_size / max(Ly, Lx)
         new_size = (int(Lx * scale), int(Ly * scale))
         outpix = outpix.resize(new_size, resample=Image.BICUBIC)
         flows = flows.resize(new_size, resample=Image.BICUBIC)
-    # else: we leave it as it is
+    # else: оставляем как есть
 
     fname_out = os.path.splitext(filepath[-1])[0] + "_outlines.png"
     outpix.save(fname_out)
