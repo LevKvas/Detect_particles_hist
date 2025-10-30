@@ -14,6 +14,7 @@ import tempfile
 import json
 import datetime
 from zipfile import ZipFile
+from huggingface_hub import hf_hub_download
 
 img = np.zeros((96, 128), dtype=np.uint8)
 fp0 = Image.fromarray(img)
@@ -36,6 +37,217 @@ except Exception as e:
     exit(1)
 
 
+def filter_edge_particles(masks, border_width=10):
+    """Фильтрует частицы, касающиеся края изображения"""
+    height, width = masks.shape
+    filtered_masks = np.zeros_like(masks)
+
+    # Создаем маску краев
+    border_mask = np.zeros((height, width), dtype=bool)
+    border_mask[:border_width, :] = True  # верхний край
+    border_mask[-border_width:, :] = True  # нижний край
+    border_mask[:, :border_width] = True  # левый край
+    border_mask[:, -border_width:] = True  # правый край
+
+    unique_labels = np.unique(masks)
+    for label in unique_labels:
+        if label == 0:  # пропускаем фон
+            continue
+
+        # Создаем маску для текущей частицы
+        particle_mask = masks == label
+
+        # Проверяем, касается ли частица края
+        touches_border = np.any(particle_mask & border_mask)
+
+        if not touches_border:
+            filtered_masks[particle_mask] = label
+
+    return filtered_masks
+
+
+def build_semiaxes_dist(contours_data_all, bins=10):
+    """Строит гистограмму распределения по полуосям"""
+    if not contours_data_all:
+        return create_empty_histogram()
+
+    major_axes = []
+    minor_axes = []
+
+    for contour_data in contours_data_all:
+        coordinates = contour_data['coordinates']
+        contour_points = np.array(coordinates, dtype=np.float32)
+
+        if len(contour_points) < 5:
+            continue
+
+        try:
+            ellipse = cv2.fitEllipse(contour_points)
+            center, axes, angle = ellipse
+
+            major_axis = max(axes) * K_PX_TO_NM
+            minor_axis = min(axes) * K_PX_TO_NM
+
+            major_axes.append(major_axis)
+            minor_axes.append(minor_axis)
+        except Exception as e:
+            continue
+
+    if not major_axes or not minor_axes:
+        return create_empty_histogram()
+
+    # Создаем столбчатую гистограмму
+    plt.figure(figsize=(14, 6))
+
+    # Определяем общий диапазон для обеих осей
+    all_axes = major_axes + minor_axes
+    max_value = max(all_axes) * 1.1
+    min_value = 0
+
+    # Создаем бины
+    bins_range = np.linspace(min_value, max_value, bins + 1)
+
+    # Строим гистограммы для обеих полуосей
+    hist_major, bin_edges = np.histogram(major_axes, bins=bins_range)
+    hist_minor, _ = np.histogram(minor_axes, bins=bins_range)
+
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    bin_width = bin_edges[1] - bin_edges[0]
+
+    # Столбцы для больших полуосей
+    bars1 = plt.bar(bin_centers - bin_width / 4, hist_major, width=bin_width / 2,
+                    alpha=0.7, color='blue', edgecolor='black', label='Major Axis (d1)')
+
+    # Столбцы для малых полуосей
+    bars2 = plt.bar(bin_centers + bin_width / 4, hist_minor, width=bin_width / 2,
+                    alpha=0.7, color='red', edgecolor='black', label='Minor Axis (d2)')
+
+    # Добавляем подписи значений
+    max_height = max(max(hist_major), max(hist_minor)) if len(hist_major) > 0 else 1
+
+    for bars, color in zip([bars1, bars2], ['white', 'white']):
+        for bar in bars:
+            height = bar.get_height()
+            if height > 0:
+                plt.text(bar.get_x() + bar.get_width() / 2, height + max_height * 0.01,
+                         f'{int(height)}', ha='center', va='bottom',
+                         fontsize=8, fontweight='bold', color=color)
+
+    plt.xlabel('Semi-Axis Length (nm)')
+    plt.ylabel('Number of Particles')
+    plt.title(f'Semi-Axes Distribution (n={len(major_axes)}, bins={bins})')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    # Добавляем статистику
+    mean_major = np.mean(major_axes)
+    mean_minor = np.mean(minor_axes)
+    std_major = np.std(major_axes)
+    std_minor = np.std(minor_axes)
+
+    plt.text(0.02, 0.98, f'Total particles: {len(major_axes)}\n'
+                         f'Major axis: {mean_major:.1f} ± {std_major:.1f} nm\n'
+                         f'Minor axis: {mean_minor:.1f} ± {std_minor:.1f} nm\n'
+                         f'Bins: {bins}',
+             transform=plt.gca().transAxes, fontsize=10,
+             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
+             verticalalignment='top')
+
+    plt.ylim(0, max_height * 1.15)
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    return Image.open(buf)
+
+
+def create_semiaxes_txt_file(contours_data_all, bins=10):
+    """Создает TXT файл с данными гистограммы полуосей"""
+    if not contours_data_all:
+        return create_empty_txt_file()
+
+    major_axes = []
+    minor_axes = []
+    aspect_ratios = []
+
+    for contour_data in contours_data_all:
+        coordinates = contour_data['coordinates']
+        contour_points = np.array(coordinates, dtype=np.float32)
+
+        if len(contour_points) < 5:
+            continue
+
+        try:
+            ellipse = cv2.fitEllipse(contour_points)
+            center, axes, angle = ellipse
+
+            major_axis = max(axes) * K_PX_TO_NM
+            minor_axis = min(axes) * K_PX_TO_NM
+            aspect_ratio = major_axis / minor_axis if minor_axis > 0 else 0
+
+            major_axes.append(major_axis)
+            minor_axes.append(minor_axis)
+            aspect_ratios.append(aspect_ratio)
+        except Exception as e:
+            continue
+
+    if not major_axes:
+        return create_empty_txt_file()
+
+    content = "SEMI-AXES DISTRIBUTION DATA\n"
+    content += "=" * 50 + "\n\n"
+
+    # Основная статистика
+    content += "SUMMARY STATISTICS\n"
+    content += "-" * 30 + "\n"
+    content += f"Total particles: {len(major_axes)}\n"
+    content += f"Major axis - Mean: {np.mean(major_axes):.2f} nm, Std: {np.std(major_axes):.2f} nm\n"
+    content += f"Minor axis - Mean: {np.mean(minor_axes):.2f} nm, Std: {np.std(minor_axes):.2f} nm\n"
+    content += f"Aspect ratio - Mean: {np.mean(aspect_ratios):.2f}, Std: {np.std(aspect_ratios):.2f}\n\n"
+
+    # Данные по частицам
+    content += "PARTICLE DATA\n"
+    content += "-" * 30 + "\n"
+    content += "Particle_ID\tMajor_Axis_nm\tMinor_Axis_nm\tAspect_Ratio\n"
+
+    for i, (major, minor, ar) in enumerate(zip(major_axes, minor_axes, aspect_ratios)):
+        content += f"{i + 1}\t{major:.2f}\t{minor:.2f}\t{ar:.2f}\n"
+
+    content += "\n\n"
+
+    # 2D гистограмма данных
+    content += "2D HISTOGRAM DATA (Major vs Minor axes)\n"
+    content += "-" * 40 + "\n"
+
+    max_range = max(max(major_axes), max(minor_axes)) * 1.1
+    hist, xedges, yedges = np.histogram2d(major_axes, minor_axes,
+                                          bins=bins,
+                                          range=[[0, max_range], [0, max_range]])
+
+    content += "Bin edges for Major axis: " + ", ".join([f"{x:.1f}" for x in xedges]) + "\n"
+    content += "Bin edges for Minor axis: " + ", ".join([f"{y:.1f}" for y in yedges]) + "\n\n"
+
+    content += "Histogram matrix (rows: minor axis, columns: major axis):\n"
+    for i in range(bins):
+        row_data = "\t".join([f"{int(hist[j, i])}" for j in range(bins)])
+        content += f"Row {i + 1}:\t{row_data}\n"
+
+    # Создаем временный файл
+    temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+    temp_file.write(content)
+    temp_file.close()
+    return temp_file.name
+
+
+def create_empty_txt_file():
+    """Создает пустой TXT файл с сообщением"""
+    temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+    temp_file.write("No data available for semi-axes distribution")
+    temp_file.close()
+    return temp_file.name
+
+
 def plot_flows(y):
     Y = (np.clip(normalize99(y[0][0]), 0, 1) - 0.5) * 2
     X = (np.clip(normalize99(y[1][0]), 0, 1) - 0.5) * 2
@@ -47,11 +259,15 @@ def plot_flows(y):
     return flow
 
 
-def plot_outlines(img, masks):
+def plot_outlines(img, masks, filtered_masks=None):
     img = normalize99(img)
     img = np.clip(img, 0, 1)
     outpix = []
-    contours, hierarchy = cv2.findContours(masks.astype(np.int32), mode=cv2.RETR_FLOODFILL,
+
+    # Используем отфильтрованные маски если они есть, иначе все маски
+    display_masks = filtered_masks if filtered_masks is not None else masks
+
+    contours, hierarchy = cv2.findContours(display_masks.astype(np.int32), mode=cv2.RETR_FLOODFILL,
                                            method=cv2.CHAIN_APPROX_SIMPLE)
     for c in range(len(contours)):
         pix = contours[c].astype(int).squeeze()
@@ -437,7 +653,8 @@ def work_with_contours(contours_data_all, bins=10):
     return build_eccentricity_dist(array_with_eccentricity, bins), build_square_dist(array_with_squares, bins)
 
 
-def cellpose_segment(filepath, max_iter=250, flow_threshold=0.4, cellprob_threshold=0, bins=10):
+def cellpose_segment(filepath, max_iter=250, flow_threshold=0.4, cellprob_threshold=0, bins=10, filter_edges=True,
+                     border_width=10):
     zip_path = os.path.splitext(filepath[-1])[0] + "_masks.zip"
     json_path = os.path.splitext(filepath[-1])[0] + "_contours.json"
 
@@ -458,24 +675,39 @@ def cellpose_segment(filepath, max_iter=250, flow_threshold=0.4, cellprob_thresh
             masks = cv2.resize(masks_small.astype('uint16'), target_size,
                                interpolation=cv2.INTER_NEAREST).astype('uint16')
 
-            contours_data = get_contour_coordinates(masks)
+            # Применяем фильтр краевых частиц
+            if filter_edges:
+                filtered_masks = filter_edge_particles(masks, border_width)
+                print(f"Filtered edge particles - remaining: {len(np.unique(filtered_masks)) - 1}")
+            else:
+                filtered_masks = masks
+
+            # Используем отфильтрованные маски для получения контуров
+            contours_data = get_contour_coordinates(filtered_masks)
             contour_data_all.extend(contours_data)
 
             print(
-                f"{formatted_now} {j} {masks.max()} {os.path.split(filepath[j])[-1]} (processed at {processing_resize}px)")
+                f"{formatted_now} {j} Original: {masks.max()}, Filtered: {filtered_masks.max()} {os.path.split(filepath[j])[-1]}")
 
+            # Сохраняем как оригинальные, так и отфильтрованные маски
             fname_masks = os.path.splitext(filepath[j])[0] + "_masks.tif"
+            fname_filtered_masks = os.path.splitext(filepath[j])[0] + "_filtered_masks.tif"
+
             imsave(fname_masks, masks)
+            imsave(fname_filtered_masks, filtered_masks)
             myzip.write(fname_masks, arcname=os.path.split(fname_masks)[-1])
+            myzip.write(fname_filtered_masks, arcname=os.path.split(fname_filtered_masks)[-1])
 
     flows = flows[0]
 
-    # Создаем файл с данными гистограмм
+    # Создаем файлы с данными гистограмм
     hist_txt_path = create_histogram_txt_file(contour_data_all, bins)
+    semiaxes_txt_path = create_semiaxes_txt_file(contour_data_all, bins)
 
-    # Остальной код
-    outpix = plot_outlines(img_input, masks)
+    # Создаем outlines с отфильтрованными масками
+    outpix = plot_outlines(img_input, masks, filtered_masks)
     hist_eccentricity, hist_squares = work_with_contours(contour_data_all, bins)
+    hist_semiaxes = build_semiaxes_dist(contour_data_all, bins)
 
     with open(json_path, 'w') as f:
         json.dump(contour_data_all, f, indent=2)
@@ -496,12 +728,13 @@ def cellpose_segment(filepath, max_iter=250, flow_threshold=0.4, cellprob_thresh
     if len(filepath) > 1:
         b1 = gr.DownloadButton(visible=True, value=zip_path)
     else:
-        b1 = gr.DownloadButton(visible=True, value=fname_masks)
+        b1 = gr.DownloadButton(visible=True, value=fname_filtered_masks)
     b2 = gr.DownloadButton(visible=True, value=fname_out)
     b3 = gr.DownloadButton(visible=True, value=json_path)
     b4 = gr.DownloadButton(visible=True, value=hist_txt_path, label="Download Histogram Data (TXT)")
+    b5 = gr.DownloadButton(visible=True, value=semiaxes_txt_path, label="Download Semi-Axes Data (TXT)")
 
-    return outpix, flows, b1, b2, b3, b4, hist_eccentricity, hist_squares
+    return outpix, flows, b1, b2, b3, b4, b5, hist_eccentricity, hist_squares, hist_semiaxes
 
 
 def norm_path(filepath):
@@ -545,6 +778,12 @@ with gr.Blocks(title="Cellpose-SAM", css=".gradio-container {background:purple;}
                         max_iter = gr.Number(label='max iterations', value=250)
                         flow_threshold = gr.Number(label='flow threshold', value=0.4)
                         cellprob_threshold = gr.Number(label='cellprob threshold', value=0)
+
+                    # Добавляем фильтр краев
+                    with gr.Row():
+                        filter_edges = gr.Checkbox(label='Filter edge particles', value=True)
+                        border_width = gr.Number(label='Border width (px)', value=10, minimum=1, maximum=50)
+
                     bins_number = gr.Number(label='Number of bins in histograms', value=10, minimum=5, maximum=50)
                     up_btn = gr.UploadButton("Multi-file upload (png, jpg, tif etc)", visible=True,
                                              file_count="multiple")
@@ -554,12 +793,14 @@ with gr.Blocks(title="Cellpose-SAM", css=".gradio-container {background:purple;}
                     down_btn2 = gr.DownloadButton("Download outlines (PNG)", visible=False)
                     down_btn3 = gr.DownloadButton("Download contours (JSON)", visible=False)
                     down_btn4 = gr.DownloadButton("Download Histogram Data (TXT)", visible=False)
+                    down_btn5 = gr.DownloadButton("Download Semi-Axes Data (TXT)", visible=False)
 
         with gr.Column(scale=2):
             outlines = gr.Image(label="Outlines", type="pil", format='png', value=fp0)
             flows = gr.Image(label="Cellpose flows", type="pil", format='png', value=fp0)
             hist_eccentricity = gr.Image(label="Eccentricity Distribution", type="pil", format='png', value=fp0)
             hist_squares = gr.Image(label="Squares Distribution", type="pil", format='png', value=fp0)
+            hist_semiaxes = gr.Image(label="Semi-Axes Distribution", type="pil", format='png', value=fp0)
 
     sample_list = glob.glob("samples/*.png") if os.path.exists("samples") else []
 
@@ -570,8 +811,10 @@ with gr.Blocks(title="Cellpose-SAM", css=".gradio-container {background:purple;}
     input_image.upload(update_button, input_image, [input_image, up_btn, outlines, flows])
     up_btn.upload(update_image, up_btn, [input_image, up_btn, outlines, flows])
 
-    send_btn.click(cellpose_segment, [up_btn, max_iter, flow_threshold, cellprob_threshold, bins_number],
-                   [outlines, flows, down_btn, down_btn2, down_btn3, down_btn4, hist_eccentricity, hist_squares])
+    send_btn.click(cellpose_segment,
+                   [up_btn, max_iter, flow_threshold, cellprob_threshold, bins_number, filter_edges, border_width],
+                   [outlines, flows, down_btn, down_btn2, down_btn3, down_btn4, down_btn5,
+                    hist_eccentricity, hist_squares, hist_semiaxes])
 
     gr.HTML("""<h4 style="color:white;"> Notes:<br> 
                     <li>you can load and process 2D, multi-channel tifs.
