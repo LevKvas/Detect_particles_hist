@@ -426,8 +426,19 @@ def build_square_dist(some_array, bins=10):
     if not some_array:
         return create_empty_histogram()
 
-    min_square = min(some_array)
-    max_square = max(some_array)
+    some_array = np.array(some_array)
+    Q1 = np.percentile(some_array, 25)
+    Q3 = np.percentile(some_array, 75)
+    IQR = Q3 - Q1
+    upper_bound = Q3 + 1.5 * IQR
+
+    filtered_array = some_array[some_array <= upper_bound]
+
+    if len(filtered_array) == 0:
+        return create_empty_histogram()
+
+    min_square = min(filtered_array)
+    max_square = max(filtered_array)
 
     if max_square < 1.0:
         max_square = 1.0
@@ -435,7 +446,7 @@ def build_square_dist(some_array, bins=10):
         max_square = max_square * 1.1
 
     square_bins = np.linspace(min_square, max_square, bins + 1)
-    hist, bin_edges = np.histogram(some_array, bins=square_bins)
+    hist, bin_edges = np.histogram(filtered_array, bins=square_bins)
 
     plt.figure(figsize=(12, 6))
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
@@ -474,7 +485,7 @@ def build_square_dist(some_array, bins=10):
 
     plt.xlabel('Square, nm^2')
     plt.ylabel('Number of Particles')
-    plt.title(f'Square Distribution (n={len(some_array)}, bins={bins})')
+    plt.title(f'Square Distribution (n={len(filtered_array)}, bins={bins})')
     plt.grid(True, alpha=0.3)
 
     if bins > 20:
@@ -485,7 +496,7 @@ def build_square_dist(some_array, bins=10):
         plt.xticks(bin_edges)
 
     total_particles = np.sum(hist)
-    mean_square = np.mean(some_array) if len(some_array) > 0 else 0
+    mean_square = np.mean(filtered_array) if len(filtered_array) > 0 else 0
     plt.text(0.02, 0.98, f'Total particles: {total_particles}\nBins: {bins}\nMean: {mean_square:.2f} nm²',
              transform=plt.gca().transAxes, fontsize=10,
              bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray"))
@@ -572,10 +583,22 @@ def create_square_data(contours_data_all, bins=10):
     if not array_with_squares:
         return None, None
 
-    min_square = min(array_with_squares)
-    max_square = max(array_with_squares) * 1.1
+    # ФИЛЬТРАЦИЯ ВЫБРОСОВ (как в build_square_dist)
+    array_with_squares = np.array(array_with_squares)
+    Q1 = np.percentile(array_with_squares, 25)
+    Q3 = np.percentile(array_with_squares, 75)
+    IQR = Q3 - Q1
+    upper_bound = Q3 + 1.5 * IQR
+
+    filtered_array = array_with_squares[array_with_squares <= upper_bound]
+
+    if len(filtered_array) == 0:
+        return None, None
+
+    min_square = min(filtered_array)
+    max_square = max(filtered_array) * 1.1
     square_bins = np.linspace(min_square, max_square, bins + 1)
-    hist, bin_edges = np.histogram(array_with_squares, bins=square_bins)
+    hist, bin_edges = np.histogram(filtered_array, bins=square_bins)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
 
     return bin_centers.tolist(), hist.tolist()
